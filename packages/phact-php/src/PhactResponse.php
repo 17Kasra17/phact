@@ -7,7 +7,6 @@ class PhactResponse extends Response
     private array $props;
     private string $pageName;
 
-
     public function __construct(string $pageName, array $props)
     {
         $this->pageName = $pageName;
@@ -20,21 +19,39 @@ class PhactResponse extends Response
 
     private function render(): array
     {
-        $component = strtoupper($this->pageName);
-        $path = realpath(Config::getPhactRootPath() . "/dist/{$component}.php");
+        $normalizedPage = trim(str_replace('\\', '/', $this->pageName), '/');
 
-        if (!$path || !file_exists($path)) {
+        if ($normalizedPage === '' || str_contains($normalizedPage, '..') || !preg_match('/^[A-Za-z0-9_\/-]+$/', $normalizedPage)) {
+            return ['Invalid page name.', 400];
+        }
+
+        $distDir = realpath(Config::getPhactRootPath() . '/dist');
+        if ($distDir === false) {
+            return ['Page does not exist.', 404];
+        }
+
+        $relativePath = str_replace('/', DIRECTORY_SEPARATOR, strtoupper($normalizedPage) . '.php');
+        $path = realpath($distDir . DIRECTORY_SEPARATOR . $relativePath);
+
+        if ($path === false || !str_starts_with($path, $distDir . DIRECTORY_SEPARATOR) || !is_file($path)) {
             return ['Page does not exist.', 404];
         }
 
         require_once $path;
 
-        if (!function_exists($component)) {
-            return ["Render function '{$component}' not found.", 500];
+        $sanitizedFn = 'PHACT_PAGE_' . preg_replace('/[^A-Z0-9_]/', '_', strtoupper($normalizedPage));
+        $legacyFn = strtoupper($normalizedPage);
+
+        if (function_exists($sanitizedFn)) {
+            $fn = $sanitizedFn;
+        } elseif (function_exists($legacyFn)) {
+            $fn = $legacyFn;
+        } else {
+            return ["Render function '{$sanitizedFn}' not found.", 500];
         }
 
         ob_start();
-        $component($this->props);
+        $fn($this->props);
         $body = ob_get_clean();
 
         return [$body, 200];

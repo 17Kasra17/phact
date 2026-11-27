@@ -10,9 +10,33 @@ import esbuild from 'esbuild';
 import chalk from 'chalk';
 import ora from 'ora';
 import {Document} from '@phact-org/phact/document';
+import {collectedHead, resetCollectedHead} from '@phact-org/phact/components';
 
 
 const normalizePath = (filePath) => filePath.replace(/\\/g, '/');
+
+function collectPages(dir, baseDir = dir) {
+    const entries = fs.readdirSync(dir, {withFileTypes: true});
+    const results = [];
+
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            results.push(...collectPages(fullPath, baseDir));
+        } else if (entry.isFile()) {
+            const ext = path.extname(entry.name);
+            if (['.js', '.jsx'].includes(ext)) {
+                const relPath = normalizePath(path.relative(baseDir, fullPath));
+                results.push({
+                    fullPath,
+                    relName: relPath.slice(0, -ext.length),
+                });
+            }
+        }
+    }
+
+    return results;
+}
 
 async function handler(argv) {
     console.log(chalk.cyan('Starting Phact build process...'));
@@ -45,20 +69,16 @@ async function handler(argv) {
     }
 
     const outputDir = path.join(process.cwd(), 'dist');
+    const publicDir = path.join(process.cwd(), 'public');
     fsExtra.removeSync(outputDir);
     fs.mkdirSync(outputDir, {recursive: true});
     console.log(`Build directory ${chalk.yellow('dist/')} cleaned.`);
 
-    const pages = fs.readdirSync(pagesPath).filter(page => fs.statSync(path.join(pagesPath, page)).isFile());
+    const pages = collectPages(pagesPath);
     const buildSpinner = ora(`Found ${pages.length} pages to build. Starting...`).start();
 
-    for (const pageFile of pages) {
-        const fullPath = path.join(pagesPath, pageFile);
-        const ext = path.extname(pageFile);
-        if (!['.js', '.jsx'].includes(ext)) continue;
-
-        const pageName = path.basename(pageFile, ext);
-        buildSpinner.text = `Building page: ${chalk.cyan(pageName)}`;
+    for (const {fullPath, relName} of pages) {
+        buildSpinner.text = `Building page: ${chalk.cyan(relName)}`;
 
         try {
             const requirePath = normalizePath(fullPath);
@@ -66,25 +86,33 @@ async function handler(argv) {
             const PageComponent = require(requirePath).default;
 
             if (!PageComponent) {
-                buildSpinner.warn(chalk.yellow(`No default export in ${chalk.cyan(pageFile)}. Skipping.`));
+                buildSpinner.warn(chalk.yellow(`No default export in ${chalk.cyan(relName)}. Skipping.`));
                 continue;
             }
 
             const jsxPropsTree = extractJsxPropsTree(fullPath);
             const appElement = <PageComponent props={jsxPropsTree}/>;
 
+            resetCollectedHead();
+            const appHtml = renderToString(appElement);
+            const pageHead = [...collectedHead];
+            resetCollectedHead();
+
             let documentHtml = renderToString(
-                <Document pageName={pageName} AppContents={appElement}/>
+                <Document pageName={relName} appHtml={appHtml} headElements={pageHead}/>
             );
 
             documentHtml = documentHtml.replace(/__PHACT_PLACEHOLDER_(.+?)__/g, (match, base64) => {
                 const json = Buffer.from(base64, 'base64').toString('utf8');
                 const parts = JSON.parse(json);
-                return `<?php echo $props${parts.map(p => `["${p}"]`).join('')}; ?>`;
+                const access = `$props${parts.map(p => `[${JSON.stringify(p)}]`).join('')}`;
+                return `<?php echo htmlspecialchars((string)(${access} ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8'); ?>`;
             });
 
-            const finalPhpContent = `<?php function ${pageName.toUpperCase()}($props){ ?>${documentHtml}<?php } ?>`;
-            const outPath = path.join(outputDir, `${pageName.toUpperCase()}.php`);
+            const phpFnName = 'PHACT_PAGE_' + relName.toUpperCase().replace(/[^A-Z0-9_]/g, '_');
+            const finalPhpContent = `<?php function ${phpFnName}(array $props){ ?>${documentHtml}<?php } ?>`;
+            const outPath = path.join(outputDir, `${relName.toUpperCase()}.php`);
+            fs.mkdirSync(path.dirname(outPath), {recursive: true});
             fs.writeFileSync(outPath, finalPhpContent);
 
             const clientEntryContent = `
@@ -94,6 +122,9 @@ async function handler(argv) {
                 hydrate(PageComponent);
             `;
 
+            const jsOutPath = path.join(outputDir, `${relName}.js`);
+            fs.mkdirSync(path.dirname(jsOutPath), {recursive: true});
+
             await esbuild.build({
                 stdin: {
                     contents: clientEntryContent,
@@ -101,21 +132,28 @@ async function handler(argv) {
                     sourcefile: 'client-entry.js'
                 },
                 bundle: true,
-                outfile: path.join(outputDir, `${pageName}.js`),
+                outfile: jsOutPath,
                 platform: 'browser',
                 format: 'iife',
                 loader: {'.js': 'jsx'},
                 sourcemap: true,
             });
 
+            const publicJsPath = path.join(publicDir, `${relName}.js`);
+            fs.mkdirSync(path.dirname(publicJsPath), {recursive: true});
+            fs.copyFileSync(jsOutPath, publicJsPath);
+            if (fs.existsSync(`${jsOutPath}.map`)) {
+                fs.copyFileSync(`${jsOutPath}.map`, `${publicJsPath}.map`);
+            }
+
         } catch (error) {
-            buildSpinner.fail(chalk.red(`Failed to build page ${chalk.cyan(pageFile)}.`));
+            buildSpinner.fail(chalk.red(`Failed to build page ${chalk.cyan(relName)}.`));
             console.error(chalk.gray(error.stack || error.message));
         }
     }
 
     buildSpinner.succeed(chalk.green.bold('Build completed successfully!'));
-    console.log(`\nOutput files are in the ${chalk.yellow('dist/')} directory.`);
+    console.log(`\nOutput files are in ${chalk.yellow('dist/')} and client bundles were copied to ${chalk.yellow('public/')}.`);
 }
 
 function extractJsxPropsTree(file) {

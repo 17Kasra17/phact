@@ -1,5 +1,5 @@
 <?php
 
-define("PHACT_ROOT", realpath('../'));
+define("PHACT_ROOT", realpath(__DIR__ . '/..'));
 
-require '../src/backend/bootstrap.php';
+require __DIR__ . '/../src/backend/bootstrap.php';

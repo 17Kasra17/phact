@@ -5,12 +5,12 @@ class Request
 {
     public static function getMethod(): string
     {
-        return $_SERVER['REQUEST_METHOD'];
+        return $_SERVER['REQUEST_METHOD'] ?? 'GET';
     }
 
     public static function getUri(): string
     {
-        $uri = $_SERVER['REQUEST_URI'];
+        $uri = $_SERVER['REQUEST_URI'] ?? '/';
         $uri = strtok($uri, '?');
         return rtrim($uri, '/') ?: '/';
     }
